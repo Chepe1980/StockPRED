@@ -3,6 +3,7 @@ matplotlib
 pandas
 numpy
 seaborn
+yfinance
 plotly
 xgboost
 scikit-learn
