@@ -4,4 +4,4 @@ numpy
 plotly
 xgboost
 scikit-learn
-pandas-datareader
+pandas-datareader==0.10.0
