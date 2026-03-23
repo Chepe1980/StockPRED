@@ -4,5 +4,5 @@ numpy
 plotly
 xgboost
 sckit-learn
-import pandas
+pandas
 warnings
