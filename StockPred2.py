@@ -6,7 +6,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import yfinance as yf  # Replace pandas_datareader with yfinance
+import yfinance as yf
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
@@ -89,7 +89,7 @@ confidence_interval = st.sidebar.slider(
     step=1
 )
 
-# Load data with caching - using yfinance instead of pandas_datareader
+# Load data with caching
 @st.cache_data(ttl=3600)
 def load_stock_data(symbol, start, end):
     try:
@@ -172,14 +172,14 @@ def train_xgboost_model(X_train, y_train):
     return model
 
 # Generate future predictions
-def predict_future(model, last_data, days_ahead=730):
-    """Predict future prices for specified number of days (2 years ≈ 730 trading days)"""
+def predict_future(model, last_data, feature_cols, days_ahead=730):
+    """Predict future prices for specified number of days"""
     predictions = []
     current_data = last_data.copy()
     
     for _ in range(days_ahead):
-        # Prepare features for prediction
-        features = current_data[-1:].drop('Close', axis=1)
+        # Prepare features for prediction - ensure we only use the same feature columns
+        features = current_data[feature_cols].iloc[-1:].values
         next_pred = model.predict(features)[0]
         predictions.append(next_pred)
         
@@ -194,6 +194,56 @@ def predict_future(model, last_data, days_ahead=730):
                     new_row[f'lag_{i}'] = current_data['Close'].iloc[-1]
                 else:
                     new_row[f'lag_{i}'] = current_data[f'lag_{i-1}'].iloc[-1] if i-1 <= len(current_data) else current_data['Close'].iloc[-1]
+        
+        # Update rolling statistics
+        for window in [5, 10, 20, 50]:
+            if f'rolling_mean_{window}' in new_row.columns:
+                # Get recent values for rolling calculation
+                recent_values = current_data['Close'].tail(window)
+                new_row[f'rolling_mean_{window}'] = recent_values.mean()
+                new_row[f'rolling_std_{window}'] = recent_values.std()
+        
+        # Update daily return and volatility
+        if len(current_data) > 1:
+            prev_close = current_data['Close'].iloc[-2]
+            new_row['daily_return'] = (next_pred - prev_close) / prev_close
+            recent_returns = current_data['daily_return'].tail(20)
+            new_row['daily_volatility'] = recent_returns.std()
+        
+        # Update technical indicators
+        if 'RSI' in new_row.columns:
+            # Simplified RSI update
+            recent_closes = current_data['Close'].tail(14)
+            avg_gain = 0
+            avg_loss = 0
+            for i in range(1, len(recent_closes)):
+                change = recent_closes.iloc[i] - recent_closes.iloc[i-1]
+                if change > 0:
+                    avg_gain += change
+                else:
+                    avg_loss += abs(change)
+            avg_gain /= 14
+            avg_loss /= 14
+            if avg_loss == 0:
+                new_row['RSI'] = 100
+            else:
+                rs = avg_gain / avg_loss
+                new_row['RSI'] = 100 - (100 / (1 + rs))
+        
+        # Update MACD
+        if 'MACD' in new_row.columns:
+            recent_closes = current_data['Close'].tail(26)
+            exp1 = recent_closes.ewm(span=12, adjust=False).mean().iloc[-1]
+            exp2 = recent_closes.ewm(span=26, adjust=False).mean().iloc[-1]
+            new_row['MACD'] = exp1 - exp2
+            macd_values = current_data['MACD'].tail(9)
+            new_row['MACD_signal'] = macd_values.mean()
+        
+        # Update volume features
+        if 'volume_ma' in new_row.columns:
+            recent_volumes = current_data['Volume'].tail(20)
+            new_row['volume_ma'] = recent_volumes.mean()
+            new_row['volume_ratio'] = 1.0  # Assume average volume for prediction
         
         current_data = pd.concat([current_data, new_row], ignore_index=True)
     
@@ -309,23 +359,26 @@ if df is not None and not df.empty:
                         df_features[f'lag_{i}'] = df_features['Close'].shift(i)
                     df_features = df_features.dropna()
                 
+                # Define feature columns (excluding target and original OHLCV columns)
+                exclude_cols = ['Close', 'Open', 'High', 'Low', 'Volume']
+                feature_cols = [col for col in df_features.columns if col not in exclude_cols]
+                
                 # Split data
-                split_date = df_features.index[int(len(df_features) * 0.8)]
-                train_data = df_features[df_features.index < split_date]
-                test_data = df_features[df_features.index >= split_date]
+                split_idx = int(len(df_features) * 0.8)
+                train_data = df_features.iloc[:split_idx]
+                test_data = df_features.iloc[split_idx:]
                 
                 # Prepare features
-                feature_cols = [col for col in train_data.columns if col not in ['Close', 'Open', 'High', 'Low', 'Volume']]
-                X_train = train_data[feature_cols]
-                y_train = train_data['Close']
-                X_test = test_data[feature_cols]
-                y_test = test_data['Close']
+                X_train = train_data[feature_cols].values
+                y_train = train_data['Close'].values
+                X_test = test_data[feature_cols].values
+                y_test = test_data['Close'].values
                 
                 # Train model
-                model = train_xgboost_model(X_train.values, y_train.values)
+                model = train_xgboost_model(X_train, y_train)
                 
                 # Make predictions on test set
-                y_pred = model.predict(X_test.values)
+                y_pred = model.predict(X_test)
                 
                 # Calculate metrics
                 mse = mean_squared_error(y_test, y_pred)
@@ -387,7 +440,12 @@ if df is not None and not df.empty:
                 with st.spinner("Generating future predictions..."):
                     # Prepare last data point for prediction
                     last_data = df_features.tail(1).copy()
-                    future_prices = predict_future(model, last_data, days_ahead=730)
+                    
+                    # Store the feature columns before modification
+                    current_feature_cols = feature_cols.copy()
+                    
+                    # Generate future predictions with consistent features
+                    future_prices = predict_future(model, last_data, current_feature_cols, days_ahead=730)
                     
                     # Create future dates (trading days only approximation)
                     last_date = df.index[-1]
