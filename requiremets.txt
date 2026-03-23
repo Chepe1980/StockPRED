@@ -3,6 +3,6 @@ pandas
 numpy
 plotly
 xgboost
-sckit-learn
+scikit-learn
 import pandas
 warnings
