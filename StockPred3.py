@@ -644,7 +644,3 @@ elif not TENSORFLOW_AVAILABLE:
     Please install TensorFlow to use the LSTM model:
     ```bash
     pip install tensorflow
-    Alternatively, you can use the XGBoost version of this app.
-""")
-else:
-st.error("Failed to load data. Please check your internet connection and try again."
