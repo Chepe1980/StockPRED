@@ -1,6 +1,6 @@
 streamlit
 pandas
-pip install tensorflow
+tensorflow
 numpy
 plotly
 scikit-learn
