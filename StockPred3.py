@@ -6,8 +6,8 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import StandardScaler, RobustScaler
 import yfinance as yf
 from datetime import datetime, timedelta
 import warnings
@@ -40,6 +40,12 @@ st.markdown("""
         border-radius: 10px;
         border-left: 5px solid #28a745;
     }
+    .metric-moderate {
+        background-color: #fff3cd;
+        padding: 10px;
+        border-radius: 10px;
+        border-left: 5px solid #ffc107;
+    }
     .metric-poor {
         background-color: #f8d7da;
         padding: 10px;
@@ -51,7 +57,7 @@ st.markdown("""
 
 # Title and description
 st.title("📈 Stock Price Analyzer & Predictor")
-st.markdown("Analyze historical stock data and get AI-powered price predictions with adjustable time horizons")
+st.markdown("Analyze historical stock data and get AI-powered price predictions with improved time series forecasting")
 
 # Sidebar
 st.sidebar.header("⚙️ Configuration")
@@ -88,7 +94,7 @@ st.sidebar.markdown("### Time Frame Analysis")
 end_date = datetime.now()
 start_date = st.sidebar.date_input(
     "Start Date",
-    value=pd.to_datetime('2020-01-01'),
+    value=pd.to_datetime('2018-01-01'),  # More historical data for better training
     max_value=end_date
 )
 
@@ -103,6 +109,17 @@ confidence_interval = st.sidebar.slider(
     step=1
 )
 
+# Cross-validation settings
+st.sidebar.markdown("### Cross-Validation")
+cv_folds = st.sidebar.slider(
+    "Time Series CV Folds",
+    min_value=3,
+    max_value=10,
+    value=5,
+    step=1,
+    help="More folds = more robust but slower training"
+)
+
 # Prediction horizon settings
 st.sidebar.markdown("### Prediction Horizon")
 prediction_unit = st.sidebar.selectbox(
@@ -115,45 +132,41 @@ if prediction_unit == "Weeks":
     prediction_value = st.sidebar.slider(
         "Number of Weeks to Predict",
         min_value=1,
-        max_value=52,  # 1 year max in weeks
+        max_value=52,
         value=12,
         step=1
     )
-    trading_days = prediction_value * 5  # Approximate trading days per week
+    trading_days = prediction_value * 5
     horizon_text = f"{prediction_value} Week{'s' if prediction_value > 1 else ''}"
-else:  # Months
+else:
     prediction_value = st.sidebar.slider(
         "Number of Months to Predict",
         min_value=1,
-        max_value=24,  # 2 years max
+        max_value=24,
         value=6,
         step=1
     )
-    trading_days = prediction_value * 21  # Approximate trading days per month
+    trading_days = prediction_value * 21
     horizon_text = f"{prediction_value} Month{'s' if prediction_value > 1 else ''}"
 
-# Advanced model tuning
-st.sidebar.markdown("### Advanced Model Tuning")
-enable_grid_search = st.sidebar.checkbox("Enable Grid Search (Slower but Better)", value=False)
-model_complexity = st.sidebar.select_slider(
-    "Model Complexity",
-    options=["Low", "Medium", "High"],
-    value="Medium"
+# Model regularization settings
+st.sidebar.markdown("### Regularization (Prevent Overfitting)")
+reg_alpha = st.sidebar.slider(
+    "L1 Regularization (reg_alpha)",
+    min_value=0.0,
+    max_value=10.0,
+    value=1.0,
+    step=0.5,
+    help="Higher values = more regularization, reduces overfitting"
 )
-
-# Set model parameters based on complexity
-if model_complexity == "Low":
-    n_estimators = 100
-    max_depth = 3
-    learning_rate = 0.1
-elif model_complexity == "Medium":
-    n_estimators = 200
-    max_depth = 5
-    learning_rate = 0.05
-else:  # High
-    n_estimators = 300
-    max_depth = 7
-    learning_rate = 0.03
+reg_lambda = st.sidebar.slider(
+    "L2 Regularization (reg_lambda)",
+    min_value=0.0,
+    max_value=10.0,
+    value=1.0,
+    step=0.5,
+    help="Higher values = more regularization, reduces overfitting"
+)
 
 # Load data with caching
 @st.cache_data(ttl=3600)
@@ -171,232 +184,191 @@ def load_stock_data(symbol, start, end):
         st.error(f"Error loading data for {symbol}: {e}")
         return None
 
-# Enhanced feature engineering
-def prepare_features(data, lags=20, use_all_indicators=True):
-    """Prepare features with comprehensive technical indicators"""
+# Improved feature engineering with trend decomposition
+def prepare_features(data, lags=15):  # Reduced lags to prevent overfitting
+    """Prepare features with focus on preventing overfitting"""
     df = data.copy()
     
-    # Price-based features
+    # Price-based features (reduced number of lags)
     for i in range(1, min(lags + 1, len(df) - 1)):
         df[f'lag_{i}'] = df['Close'].shift(i)
     
-    # Rolling statistics
-    for window in [5, 10, 20, 50]:
+    # Rolling statistics with shorter windows
+    for window in [5, 10, 20]:
         df[f'rolling_mean_{window}'] = df['Close'].rolling(window=window).mean()
         df[f'rolling_std_{window}'] = df['Close'].rolling(window=window).std()
-        df[f'rolling_max_{window}'] = df['Close'].rolling(window=window).max()
-        df[f'rolling_min_{window}'] = df['Close'].rolling(window=window).min()
     
-    # Price changes and returns
+    # Price changes (returns)
     df['daily_return'] = df['Close'].pct_change()
-    df['weekly_return'] = df['Close'].pct_change(5)
-    df['monthly_return'] = df['Close'].pct_change(21)
-    df['daily_volatility'] = df['daily_return'].rolling(window=20).std()
+    df['return_volatility'] = df['daily_return'].rolling(window=10).std()
     
-    # Price ratios
-    df['high_low_ratio'] = (df['High'] - df['Low']) / df['Close']
-    df['open_close_ratio'] = (df['Close'] - df['Open']) / df['Open']
+    # Key technical indicators only (most important ones)
+    # RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
     
-    if use_all_indicators:
-        # RSI
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-        
-        # MACD
-        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = exp1 - exp2
-        df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        df['MACD_histogram'] = df['MACD'] - df['MACD_signal']
-        
-        # Bollinger Bands
-        df['BB_middle'] = df['Close'].rolling(window=20).mean()
-        bb_std = df['Close'].rolling(window=20).std()
-        df['BB_upper'] = df['BB_middle'] + (bb_std * 2)
-        df['BB_lower'] = df['BB_middle'] - (bb_std * 2)
-        df['BB_width'] = (df['BB_upper'] - df['BB_lower']) / df['BB_middle']
-        
-        # ATR (Average True Range)
-        high_low = df['High'] - df['Low']
-        high_close = abs(df['High'] - df['Close'].shift())
-        low_close = abs(df['Low'] - df['Close'].shift())
-        ranges = pd.concat([high_low, high_close, low_close], axis=1)
-        true_range = np.max(ranges, axis=1)
-        df['ATR'] = true_range.rolling(window=14).mean()
-        
-        # Volume features
-        df['volume_ma'] = df['Volume'].rolling(window=20).mean()
-        df['volume_ratio'] = df['Volume'] / df['volume_ma']
-        df['volume_price_trend'] = df['Volume'] * df['daily_return']
-        
-        # Price momentum
-        df['momentum_5'] = df['Close'].pct_change(5)
-        df['momentum_10'] = df['Close'].pct_change(10)
-        df['momentum_20'] = df['Close'].pct_change(20)
+    # MACD
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp1 - exp2
+    df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    
+    # Bollinger Bands
+    df['BB_middle'] = df['Close'].rolling(window=20).mean()
+    bb_std = df['Close'].rolling(window=20).std()
+    df['BB_upper'] = df['BB_middle'] + (bb_std * 2)
+    df['BB_lower'] = df['BB_middle'] - (bb_std * 2)
+    df['BB_position'] = (df['Close'] - df['BB_lower']) / (df['BB_upper'] - df['BB_lower'])
+    
+    # Volume features
+    df['volume_ratio'] = df['Volume'] / df['Volume'].rolling(window=20).mean()
+    
+    # Trend indicators
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    df['SMA_200'] = df['Close'].rolling(window=200).mean()
+    df['price_vs_sma50'] = (df['Close'] - df['SMA_50']) / df['SMA_50']
+    df['price_vs_sma200'] = (df['Close'] - df['SMA_200']) / df['SMA_200']
     
     # Drop NaN values
     df = df.dropna()
     
     return df
 
-# Optimized XGBoost model training with time series cross-validation
-def train_xgboost_model(X_train, y_train, enable_grid_search=False):
-    base_model = xgb.XGBRegressor(
-        n_estimators=n_estimators,
-        learning_rate=learning_rate,
-        max_depth=max_depth,
-        min_child_weight=3,
-        subsample=0.8,
-        colsample_bytree=0.8,
+# Time series cross-validation
+def time_series_cv_score(model, X, y, n_splits=5):
+    """Calculate cross-validation scores with time series split"""
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    cv_scores = []
+    
+    for train_idx, val_idx in tscv.split(X):
+        X_train, X_val = X[train_idx], X[val_idx]
+        y_train, y_val = y[train_idx], y[val_idx]
+        
+        # Train model
+        model_clone = xgb.XGBRegressor(
+            n_estimators=100,
+            learning_rate=0.05,
+            max_depth=4,
+            min_child_weight=5,
+            subsample=0.7,
+            colsample_bytree=0.7,
+            reg_alpha=reg_alpha,
+            reg_lambda=reg_lambda,
+            random_state=42
+        )
+        model_clone.fit(X_train, y_train, verbose=False)
+        
+        # Predict and score
+        y_pred = model_clone.predict(X_val)
+        score = r2_score(y_val, y_pred)
+        cv_scores.append(score)
+    
+    return np.mean(cv_scores), np.std(cv_scores)
+
+# Train XGBoost model with regularization
+def train_xgboost_model(X_train, y_train, X_val, y_val):
+    """Train model with early stopping to prevent overfitting"""
+    model = xgb.XGBRegressor(
+        n_estimators=500,
+        learning_rate=0.03,
+        max_depth=4,
+        min_child_weight=5,
+        subsample=0.7,
+        colsample_bytree=0.7,
+        reg_alpha=reg_alpha,
+        reg_lambda=reg_lambda,
         random_state=42,
         n_jobs=-1
     )
     
-    if enable_grid_search and len(X_train) > 100:
-        # Simplified grid search for better performance
-        param_grid = {
-            'n_estimators': [100, 200],
-            'max_depth': [3, 5],
-            'learning_rate': [0.05, 0.1],
-            'subsample': [0.8, 1.0]
-        }
-        
-        tscv = TimeSeriesSplit(n_splits=3)
-        grid_search = GridSearchCV(
-            base_model, 
-            param_grid, 
-            cv=tscv, 
-            scoring='neg_mean_squared_error',
-            n_jobs=-1,
-            verbose=0
-        )
-        grid_search.fit(X_train, y_train)
-        model = grid_search.best_estimator_
-        st.info(f"Best parameters: {grid_search.best_params_}")
-    else:
-        # Simple train/validation split
-        split_idx = int(len(X_train) * 0.8)
-        X_tr, X_val = X_train[:split_idx], X_train[split_idx:]
-        y_tr, y_val = y_train[:split_idx], y_train[split_idx:]
-        
-        model = base_model
-        model.fit(
-            X_tr, y_tr,
-            eval_set=[(X_val, y_val)],
-            verbose=False
-        )
+    # Train with early stopping
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        eval_metric='rmse',
+        early_stopping_rounds=20,
+        verbose=False
+    )
     
     return model
 
-# Generate future predictions with improved dynamics
-def predict_future(model, last_data, feature_cols, days_ahead, scaler=None):
-    """Predict future prices with rolling updates"""
+# Generate future predictions with uncertainty estimation
+def predict_future(model, last_data, feature_cols, days_ahead, scaler, model_uncertainty):
+    """Predict future prices with uncertainty propagation"""
     predictions = []
+    uncertainties = []
     current_data = last_data.copy()
     
     for i in range(days_ahead):
         # Prepare features for prediction
         features = current_data[feature_cols].iloc[-1:].values
-        if scaler:
-            features = scaler.transform(features)
-        next_pred = model.predict(features)[0]
+        features_scaled = scaler.transform(features)
+        next_pred = model.predict(features_scaled)[0]
         predictions.append(next_pred)
+        
+        # Add prediction uncertainty
+        uncertainties.append(model_uncertainty * (1 + i / days_ahead))
         
         # Create new row with updated features
         new_row = current_data.iloc[-1:].copy()
         new_row['Close'] = next_pred
         
-        # Update lag features
-        for lag in range(1, 21):
+        # Update lag features (simplified to prevent error accumulation)
+        for lag in range(1, 16):
             if f'lag_{lag}' in new_row.columns:
                 if lag == 1:
                     new_row[f'lag_{lag}'] = current_data['Close'].iloc[-1]
                 else:
                     new_row[f'lag_{lag}'] = current_data[f'lag_{lag-1}'].iloc[-1] if lag-1 < len(current_data) else current_data['Close'].iloc[-1]
         
-        # Update rolling statistics with improved logic
-        for window in [5, 10, 20, 50]:
+        # Update rolling statistics
+        for window in [5, 10, 20]:
             if f'rolling_mean_{window}' in new_row.columns:
                 recent_values = current_data['Close'].tail(window)
                 new_row[f'rolling_mean_{window}'] = recent_values.mean()
                 new_row[f'rolling_std_{window}'] = recent_values.std()
-                new_row[f'rolling_max_{window}'] = recent_values.max()
-                new_row[f'rolling_min_{window}'] = recent_values.min()
         
         # Update returns
         if len(current_data) > 1:
             prev_close = current_data['Close'].iloc[-2]
             new_row['daily_return'] = (next_pred - prev_close) / prev_close
-            if len(current_data) >= 5:
-                prev_close_5 = current_data['Close'].iloc[-5] if len(current_data) >= 5 else current_data['Close'].iloc[0]
-                new_row['weekly_return'] = (next_pred - prev_close_5) / prev_close_5
-            if len(current_data) >= 21:
-                prev_close_21 = current_data['Close'].iloc[-21] if len(current_data) >= 21 else current_data['Close'].iloc[0]
-                new_row['monthly_return'] = (next_pred - prev_close_21) / prev_close_21
+            new_row['return_volatility'] = current_data['daily_return'].tail(10).std() if len(current_data) >= 10 else 0.02
         
-        # Update other features
-        if 'high_low_ratio' in new_row.columns:
-            new_row['high_low_ratio'] = 0.02  # Assume moderate volatility
-        if 'open_close_ratio' in new_row.columns:
-            new_row['open_close_ratio'] = 0.01
-        
-        # Update technical indicators with simplified logic for speed
+        # Update RSI (simplified)
         if 'RSI' in new_row.columns:
-            recent_closes = current_data['Close'].tail(14)
-            gains = []
-            losses = []
-            for j in range(1, len(recent_closes)):
-                change = recent_closes.iloc[j] - recent_closes.iloc[j-1]
-                if change > 0:
-                    gains.append(change)
-                else:
-                    losses.append(abs(change))
-            avg_gain = np.mean(gains) if gains else 0
-            avg_loss = np.mean(losses) if losses else 0
-            if avg_loss == 0:
-                new_row['RSI'] = 100
-            else:
-                rs = avg_gain / avg_loss
-                new_row['RSI'] = 100 - (100 / (1 + rs))
+            # Simple RSI approximation
+            new_row['RSI'] = 50  # Neutral RSI for predictions
         
+        # Update MACD
         if 'MACD' in new_row.columns:
-            recent_closes = current_data['Close'].tail(26)
-            exp12 = recent_closes.ewm(span=12, adjust=False).mean().iloc[-1]
-            exp26 = recent_closes.ewm(span=26, adjust=False).mean().iloc[-1]
-            new_row['MACD'] = exp12 - exp26
-            macd_values = current_data['MACD'].tail(9)
-            new_row['MACD_signal'] = macd_values.mean() if len(macd_values) > 0 else new_row['MACD']
-            new_row['MACD_histogram'] = new_row['MACD'] - new_row['MACD_signal']
+            new_row['MACD'] = 0
+            new_row['MACD_signal'] = 0
         
+        # Update Bollinger Bands
         if 'BB_middle' in new_row.columns:
             recent_closes = current_data['Close'].tail(20)
             new_row['BB_middle'] = recent_closes.mean()
             bb_std = recent_closes.std()
             new_row['BB_upper'] = new_row['BB_middle'] + (bb_std * 2)
             new_row['BB_lower'] = new_row['BB_middle'] - (bb_std * 2)
-            new_row['BB_width'] = (new_row['BB_upper'] - new_row['BB_lower']) / new_row['BB_middle']
+            new_row['BB_position'] = 0.5
         
-        if 'ATR' in new_row.columns:
-            new_row['ATR'] = current_data['ATR'].tail(14).mean() if len(current_data) >= 14 else 0.02 * next_pred
+        # Update volume
+        if 'volume_ratio' in new_row.columns:
+            new_row['volume_ratio'] = 1.0
         
-        # Update momentum
-        if 'momentum_5' in new_row.columns and len(current_data) >= 5:
-            prev_close_5 = current_data['Close'].iloc[-5]
-            new_row['momentum_5'] = (next_pred - prev_close_5) / prev_close_5
-        if 'momentum_10' in new_row.columns and len(current_data) >= 10:
-            prev_close_10 = current_data['Close'].iloc[-10]
-            new_row['momentum_10'] = (next_pred - prev_close_10) / prev_close_10
-        if 'momentum_20' in new_row.columns and len(current_data) >= 20:
-            prev_close_20 = current_data['Close'].iloc[-20]
-            new_row['momentum_20'] = (next_pred - prev_close_20) / prev_close_20
+        # Update trend indicators
+        if 'price_vs_sma50' in new_row.columns:
+            new_row['price_vs_sma50'] = 0
+        if 'price_vs_sma200' in new_row.columns:
+            new_row['price_vs_sma200'] = 0
         
-        # Append new row
         current_data = pd.concat([current_data, new_row], ignore_index=True)
     
-    return np.array(predictions)
+    return np.array(predictions), np.array(uncertainties)
 
 # Load data
 with st.spinner(f"Loading {selected_stock} data..."):
@@ -406,6 +378,7 @@ if df is not None and not df.empty:
     # Display basic information
     st.header(f"📊 {selected_stock} Stock Analysis")
     st.markdown(f"**Period:** {df.index.min().strftime('%Y-%m-%d')} to {df.index.max().strftime('%Y-%m-%d')}")
+    st.markdown(f"**Data Points:** {len(df)} trading days")
     
     # Key metrics
     col1, col2, col3, col4 = st.columns(4)
@@ -487,7 +460,7 @@ if df is not None and not df.empty:
     
     # Model Training Section
     st.header("🤖 AI Price Prediction Model")
-    st.markdown(f"Train XGBoost model to predict stock prices for the next **{horizon_text}**")
+    st.markdown(f"Train XGBoost model with cross-validation to predict stock prices for the next **{horizon_text}**")
     
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -496,79 +469,101 @@ if df is not None and not df.empty:
         use_advanced_features = st.checkbox("Use Advanced Technical Indicators", value=True)
     
     if train_model:
-        with st.spinner("Training XGBoost model... This may take a few moments..."):
+        with st.spinner("Training XGBoost model with cross-validation... This may take a few moments..."):
             try:
                 # Prepare data
                 df_features = prepare_features(df, use_all_indicators=use_advanced_features)
                 
                 if len(df_features) < 100:
-                    st.warning("Not enough historical data for reliable predictions. Consider selecting an earlier start date.")
+                    st.warning("Limited historical data available. Predictions may be less reliable.")
+                    st.info(f"Using {len(df_features)} data points for training.")
                 
-                # Define feature columns
-                exclude_cols = ['Close', 'Open', 'High', 'Low', 'Volume']
+                # Define feature columns (exclude target and original columns)
+                exclude_cols = ['Close', 'Open', 'High', 'Low', 'Volume', 'SMA_50', 'SMA_200']
                 feature_cols = [col for col in df_features.columns if col not in exclude_cols]
                 
-                # Split data using time series split
-                split_idx = int(len(df_features) * 0.8)
-                train_data = df_features.iloc[:split_idx]
-                test_data = df_features.iloc[split_idx:]
+                # Split data using time series split (chronological order)
+                train_size = int(len(df_features) * 0.7)
+                val_size = int(len(df_features) * 0.15)
                 
-                # Prepare features with optional scaling
+                train_data = df_features.iloc[:train_size]
+                val_data = df_features.iloc[train_size:train_size+val_size]
+                test_data = df_features.iloc[train_size+val_size:]
+                
+                # Prepare features and targets
                 X_train = train_data[feature_cols].values
                 y_train = train_data['Close'].values
+                X_val = val_data[feature_cols].values
+                y_val = val_data['Close'].values
                 X_test = test_data[feature_cols].values
                 y_test = test_data['Close'].values
                 
-                # Optional scaling for better performance
-                scaler = StandardScaler()
+                # Scale features
+                scaler = RobustScaler()  # More robust to outliers
                 X_train_scaled = scaler.fit_transform(X_train)
+                X_val_scaled = scaler.transform(X_val)
                 X_test_scaled = scaler.transform(X_test)
                 
-                # Train model with grid search option
-                model = train_xgboost_model(X_train_scaled, y_train, enable_grid_search)
+                # Train model with regularization
+                model = train_xgboost_model(X_train_scaled, y_train, X_val_scaled, y_val)
                 
-                # Make predictions
-                y_pred = model.predict(X_test_scaled)
+                # Evaluate on test set
+                y_pred_test = model.predict(X_test_scaled)
                 
                 # Calculate metrics
-                mse = mean_squared_error(y_test, y_pred)
+                mse = mean_squared_error(y_test, y_pred_test)
                 rmse = np.sqrt(mse)
-                mae = mean_absolute_error(y_test, y_pred)
-                r2 = r2_score(y_test, y_pred)
-                mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
+                mae = mean_absolute_error(y_test, y_pred_test)
+                r2 = r2_score(y_test, y_pred_test)
+                mape = np.mean(np.abs((y_test - y_pred_test) / y_test)) * 100
+                
+                # Cross-validation score
+                cv_mean, cv_std = time_series_cv_score(model, X_train_scaled, y_train, n_splits=cv_folds)
                 
                 # Display metrics with visual indicators
                 st.subheader("📊 Model Performance Metrics")
                 
                 # R² score indicator
-                r2_color = "metric-good" if r2 > 0.7 else ("metric-poor" if r2 < 0.5 else "prediction-card")
+                if r2 > 0.7:
+                    r2_class = "metric-good"
+                    r2_message = "Excellent fit - Model captures price patterns well"
+                elif r2 > 0.5:
+                    r2_class = "metric-moderate"
+                    r2_message = "Moderate fit - Some predictive capability"
+                else:
+                    r2_class = "metric-poor"
+                    r2_message = "Poor fit - Market may be too volatile or data insufficient"
+                
                 st.markdown(f"""
-                <div class="{r2_color}" style="margin-bottom: 20px;">
+                <div class="{r2_class}" style="margin-bottom: 20px;">
                     <h4>Model Accuracy Assessment</h4>
-                    <p>R² Score: <b>{r2:.3f}</b> - {'Good fit' if r2 > 0.7 else 'Moderate fit' if r2 > 0.5 else 'Poor fit'}</p>
-                    <p>Higher R² values indicate better predictive accuracy. Values above 0.7 are considered good for stock prediction.</p>
+                    <p><b>Test Set R² Score:</b> {r2:.3f}</p>
+                    <p><b>Cross-Validation R²:</b> {cv_mean:.3f} (±{cv_std:.3f})</p>
+                    <p>{r2_message}</p>
+                    <p style="font-size: 12px; margin-top: 10px;">💡 R² > 0.7 indicates good predictive accuracy. Values between 0.5-0.7 show moderate accuracy. Lower values suggest high market volatility or insufficient data.</p>
                 </div>
                 """, unsafe_allow_html=True)
                 
+                # Metrics in columns
                 met_col1, met_col2, met_col3, met_col4 = st.columns(4)
                 with met_col1:
-                    st.metric("RMSE", f"${rmse:.2f}")
+                    st.metric("RMSE", f"${rmse:.2f}", help="Root Mean Square Error")
                 with met_col2:
-                    st.metric("MAE", f"${mae:.2f}")
+                    st.metric("MAE", f"${mae:.2f}", help="Mean Absolute Error")
                 with met_col3:
-                    st.metric("R² Score", f"{r2:.3f}")
+                    st.metric("R² Score", f"{r2:.3f}", help=f"Test Set Performance")
                 with met_col4:
-                    st.metric("MAPE", f"{mape:.2f}%")
+                    st.metric("CV R² Score", f"{cv_mean:.3f}", help=f"Cross-validation average ({cv_folds} folds)")
                 
                 # Plot actual vs predicted
                 fig_pred = go.Figure()
                 fig_pred.add_trace(go.Scatter(x=test_data.index, y=y_test,
                                               mode='lines', name='Actual',
                                               line=dict(color='blue', width=2)))
-                fig_pred.add_trace(go.Scatter(x=test_data.index, y=y_pred,
+                fig_pred.add_trace(go.Scatter(x=test_data.index, y=y_pred_test,
                                               mode='lines', name='Predicted',
                                               line=dict(color='red', width=2, dash='dash')))
-                fig_pred.update_layout(title='Model Predictions vs Actual Prices',
+                fig_pred.update_layout(title='Model Predictions vs Actual Prices (Test Set)',
                                        xaxis_title='Date',
                                        yaxis_title='Price ($)',
                                        template='plotly_white',
@@ -576,49 +571,70 @@ if df is not None and not df.empty:
                 st.plotly_chart(fig_pred, use_container_width=True)
                 
                 # Residual plot
-                residuals = y_test - y_pred
+                residuals = y_test - y_pred_test
                 fig_resid = go.Figure()
                 fig_resid.add_trace(go.Scatter(x=test_data.index, y=residuals,
                                               mode='markers', name='Residuals',
-                                              marker=dict(color='purple', size=5)))
+                                              marker=dict(color='purple', size=5,
+                                                         opacity=0.6)))
                 fig_resid.add_hline(y=0, line_dash="dash", line_color="red")
-                fig_resid.update_layout(title='Prediction Residuals',
+                fig_resid.add_hline(y=residuals.std() * 2, line_dash="dot", line_color="gray", 
+                                   annotation_text="+2σ")
+                fig_resid.add_hline(y=-residuals.std() * 2, line_dash="dot", line_color="gray",
+                                   annotation_text="-2σ")
+                fig_resid.update_layout(title='Prediction Residuals (Error Analysis)',
                                         xaxis_title='Date',
                                         yaxis_title='Residual ($)',
                                         template='plotly_white',
                                         height=400)
                 st.plotly_chart(fig_resid, use_container_width=True)
                 
+                # Show residual statistics
+                st.markdown("### 📉 Residual Analysis")
+                resid_col1, resid_col2, resid_col3 = st.columns(3)
+                with resid_col1:
+                    st.metric("Mean Residual", f"${residuals.mean():.2f}")
+                with resid_col2:
+                    st.metric("Std Deviation", f"${residuals.std():.2f}")
+                with resid_col3:
+                    st.metric("95% Range", f"${residuals.std() * 1.96:.2f}")
+                
                 if show_model_details:
-                    # Feature importance
+                    # Feature importance (top 20)
                     importance_df = pd.DataFrame({
-                        'feature': feature_cols[:30],
-                        'importance': model.feature_importances_[:30]
+                        'feature': feature_cols[:20],
+                        'importance': model.feature_importances_[:20]
                     }).sort_values('importance', ascending=True)
                     
                     fig_imp = go.Figure(go.Bar(
                         x=importance_df['importance'],
                         y=importance_df['feature'],
                         orientation='h',
-                        marker_color='lightblue'
+                        marker_color='lightblue',
+                        text=importance_df['importance'].round(3),
+                        textposition='outside'
                     ))
-                    fig_imp.update_layout(title='Top 30 Feature Importance',
-                                         xaxis_title='Importance',
+                    fig_imp.update_layout(title='Top 20 Feature Importance',
+                                         xaxis_title='Importance Score',
                                          yaxis_title='Features',
                                          template='plotly_white',
-                                         height=600)
+                                         height=500)
                     st.plotly_chart(fig_imp, use_container_width=True)
                 
                 # Generate predictions based on selected horizon
                 st.subheader(f"🔮 {horizon_text} Price Prediction")
                 st.markdown(f"Predicting stock prices for the next {horizon_text} (approximately {trading_days} trading days)")
                 
-                with st.spinner("Generating future predictions..."):
+                with st.spinner("Generating future predictions with uncertainty estimation..."):
                     # Prepare last data point for prediction
                     last_data = df_features.tail(1).copy()
                     
+                    # Calculate model uncertainty from residuals
+                    model_uncertainty = residuals.std()
+                    
                     # Generate future predictions
-                    future_prices = predict_future(model, last_data, feature_cols, trading_days, scaler)
+                    future_prices, uncertainties = predict_future(model, last_data, feature_cols, 
+                                                                  trading_days, scaler, model_uncertainty)
                     
                     # Create future dates
                     last_date = df.index[-1]
@@ -629,11 +645,11 @@ if df is not None and not df.empty:
                     # Create prediction dataframe
                     future_df = pd.DataFrame({
                         'Date': future_dates,
-                        'Predicted Price': future_prices
+                        'Predicted Price': future_prices,
+                        'Uncertainty': uncertainties
                     })
                     
                     # Calculate confidence intervals
-                    std_dev = np.std(residuals)
                     if confidence_interval == 95:
                         z_score = 1.96
                     elif confidence_interval == 99:
@@ -641,14 +657,14 @@ if df is not None and not df.empty:
                     else:
                         z_score = 1.282
                     
-                    future_df['Upper Bound'] = future_df['Predicted Price'] + (z_score * std_dev)
-                    future_df['Lower Bound'] = future_df['Predicted Price'] - (z_score * std_dev)
+                    future_df['Upper Bound'] = future_df['Predicted Price'] + (z_score * future_df['Uncertainty'])
+                    future_df['Lower Bound'] = future_df['Predicted Price'] - (z_score * future_df['Uncertainty'])
                     
                     # Plot predictions
                     fig_future = go.Figure()
                     
-                    # Historical data (last 6 months for context)
-                    historical_days = min(126, len(df))  # 6 months of trading days
+                    # Historical data (last year for context)
+                    historical_days = min(252, len(df))
                     fig_future.add_trace(go.Scatter(x=df.index[-historical_days:], 
                                                     y=df['Close'].tail(historical_days),
                                                     mode='lines', 
@@ -677,7 +693,7 @@ if df is not None and not df.empty:
                                                     line=dict(color='rgba(255,0,0,0)', width=0),
                                                     showlegend=True))
                     
-                    fig_future.update_layout(title=f'{selected_stock} - {horizon_text} Price Prediction',
+                    fig_future.update_layout(title=f'{selected_stock} - {horizon_text} Price Prediction with Confidence Intervals',
                                             xaxis_title='Date',
                                             yaxis_title='Price ($)',
                                             template='plotly_white',
@@ -699,6 +715,7 @@ if df is not None and not df.empty:
                             <h4>Target Price</h4>
                             <h2>${final_price:.2f}</h2>
                             <p>Expected Return: <b style="color: {'green' if total_return > 0 else 'red'}">{total_return:+.1f}%</b></p>
+                            <p style="font-size: 12px;">±${z_score * future_df['Uncertainty'].iloc[-1]:.2f}</p>
                         </div>
                         """, unsafe_allow_html=True)
                     
@@ -732,7 +749,6 @@ if df is not None and not df.empty:
                         milestone_col1, milestone_col2 = st.columns(2)
                         
                         with milestone_col1:
-                            # 3-month prediction
                             quarter_days = min(63, len(future_df))
                             quarter_price = future_df['Predicted Price'].iloc[quarter_days-1] if quarter_days > 0 else final_price
                             quarter_return = ((quarter_price - current_price) / current_price) * 100
@@ -745,7 +761,6 @@ if df is not None and not df.empty:
                             """, unsafe_allow_html=True)
                         
                         with milestone_col2:
-                            # 6-month prediction
                             half_year_days = min(126, len(future_df))
                             half_year_price = future_df['Predicted Price'].iloc[half_year_days-1] if half_year_days > 0 else final_price
                             half_year_return = ((half_year_price - current_price) / current_price) * 100
@@ -768,7 +783,7 @@ if df is not None and not df.empty:
                 
             except Exception as e:
                 st.error(f"Error during model training: {e}")
-                st.info("Try reducing the prediction horizon or using fewer features.")
+                st.info("Try reducing the prediction horizon, using fewer features, or selecting a stock with more historical data.")
     
     # Download historical data
     st.header("💾 Download Historical Data")
@@ -786,8 +801,15 @@ if df is not None and not df.empty:
     **Disclaimer:** This app uses machine learning for educational purposes only. 
     Stock market predictions are inherently uncertain. Always do your own research before making investment decisions.
     
-    **Model Information:** The XGBoost model uses technical indicators and price patterns to generate predictions. 
-    R² scores above 0.7 indicate good predictive accuracy, while lower scores suggest high market volatility.
+    **Model Improvements:**
+    - **Time Series Cross-Validation:** Prevents look-ahead bias and provides more realistic performance estimates
+    - **Regularization:** L1 and L2 regularization to reduce overfitting
+    - **Early Stopping:** Stops training when validation performance stops improving
+    - **Robust Scaling:** Handles outliers better than standard scaling
+    - **Uncertainty Estimation:** Provides confidence intervals based on historical prediction errors
+    - **Reduced Feature Set:** Focuses on most predictive indicators to prevent overfitting
+    
+    **Interpretation:** R² scores above 0.7 indicate good predictive capability. Lower scores suggest the stock is highly volatile or unpredictable with historical patterns.
     """)
     
 else:
