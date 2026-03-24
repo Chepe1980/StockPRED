@@ -190,7 +190,7 @@ def prepare_features(data, use_all_indicators=True):
     df = data.copy()
     
     # Price-based features (reduced lags to prevent overfitting)
-    for i in range(1, 16):  # Reduced from 30 to 15
+    for i in range(1, 16):
         df[f'lag_{i}'] = df['Close'].shift(i)
     
     # Rolling statistics with shorter windows
@@ -239,7 +239,7 @@ def prepare_features(data, use_all_indicators=True):
     return df
 
 # Time series cross-validation
-def time_series_cv_score(model_params, X, y, n_splits=5):
+def time_series_cv_score(X, y, n_splits=5):
     """Calculate cross-validation scores with time series split"""
     tscv = TimeSeriesSplit(n_splits=n_splits)
     cv_scores = []
@@ -272,6 +272,7 @@ def time_series_cv_score(model_params, X, y, n_splits=5):
 # Train XGBoost model with regularization
 def train_xgboost_model(X_train, y_train, X_val, y_val):
     """Train model with early stopping to prevent overfitting"""
+    # Create model
     model = xgb.XGBRegressor(
         n_estimators=500,
         learning_rate=0.03,
@@ -285,14 +286,24 @@ def train_xgboost_model(X_train, y_train, X_val, y_val):
         n_jobs=-1
     )
     
-    # Train with early stopping
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        eval_metric='rmse',
-        early_stopping_rounds=20,
-        verbose=False
-    )
+    # Train with early stopping - using the correct parameter name
+    try:
+        # Try with eval_metric (newer versions)
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            eval_metric='rmse',
+            early_stopping_rounds=20,
+            verbose=False
+        )
+    except TypeError:
+        # Fallback for older versions without eval_metric
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            early_stopping_rounds=20,
+            verbose=False
+        )
     
     return model
 
@@ -340,7 +351,7 @@ def predict_future(model, last_data, feature_cols, days_ahead, scaler, model_unc
         
         # Update technical indicators (simplified for predictions)
         if 'RSI' in new_row.columns:
-            new_row['RSI'] = 50  # Neutral RSI for predictions
+            new_row['RSI'] = 50
         
         if 'MACD' in new_row.columns:
             new_row['MACD'] = 0
@@ -477,11 +488,15 @@ if df is not None and not df.empty:
                 # Define feature columns (exclude target and original columns)
                 exclude_cols = ['Close', 'Open', 'High', 'Low', 'Volume']
                 if not use_advanced_features:
-                    exclude_cols.extend(['SMA_50', 'SMA_200', 'RSI', 'MACD', 'MACD_signal', 
-                                        'BB_middle', 'BB_upper', 'BB_lower', 'BB_position', 
-                                        'volume_ratio', 'price_vs_sma50', 'price_vs_sma200'])
+                    # If not using advanced features, exclude them from feature list
+                    advanced_cols = ['SMA_50', 'SMA_200', 'RSI', 'MACD', 'MACD_signal', 
+                                    'BB_middle', 'BB_upper', 'BB_lower', 'BB_position', 
+                                    'volume_ratio', 'price_vs_sma50', 'price_vs_sma200']
+                    exclude_cols.extend(advanced_cols)
                 
                 feature_cols = [col for col in df_features.columns if col not in exclude_cols]
+                
+                st.info(f"Using {len(feature_cols)} features for model training")
                 
                 # Split data using time series split (chronological order)
                 train_size = int(len(df_features) * 0.7)
@@ -519,7 +534,7 @@ if df is not None and not df.empty:
                 mape = np.mean(np.abs((y_test - y_pred_test) / y_test)) * 100
                 
                 # Cross-validation score
-                cv_mean, cv_std = time_series_cv_score(model, X_train_scaled, y_train, n_splits=cv_folds)
+                cv_mean, cv_std = time_series_cv_score(X_train_scaled, y_train, n_splits=cv_folds)
                 
                 # Display metrics with visual indicators
                 st.subheader("📊 Model Performance Metrics")
