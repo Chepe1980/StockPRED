@@ -94,7 +94,7 @@ st.sidebar.markdown("### Time Frame Analysis")
 end_date = datetime.now()
 start_date = st.sidebar.date_input(
     "Start Date",
-    value=pd.to_datetime('2018-01-01'),  # More historical data for better training
+    value=pd.to_datetime('2018-01-01'),
     max_value=end_date
 )
 
@@ -133,7 +133,7 @@ if prediction_unit == "Weeks":
         "Number of Weeks to Predict",
         min_value=1,
         max_value=52,
-        value=12,
+        value=4,
         step=1
     )
     trading_days = prediction_value * 5
@@ -143,7 +143,7 @@ else:
         "Number of Months to Predict",
         min_value=1,
         max_value=24,
-        value=6,
+        value=1,
         step=1
     )
     trading_days = prediction_value * 21
@@ -184,13 +184,13 @@ def load_stock_data(symbol, start, end):
         st.error(f"Error loading data for {symbol}: {e}")
         return None
 
-# Improved feature engineering with trend decomposition
-def prepare_features(data, lags=15):  # Reduced lags to prevent overfitting
-    """Prepare features with focus on preventing overfitting"""
+# Improved feature engineering
+def prepare_features(data, use_all_indicators=True):
+    """Prepare features with technical indicators"""
     df = data.copy()
     
-    # Price-based features (reduced number of lags)
-    for i in range(1, min(lags + 1, len(df) - 1)):
+    # Price-based features (reduced lags to prevent overfitting)
+    for i in range(1, 16):  # Reduced from 30 to 15
         df[f'lag_{i}'] = df['Close'].shift(i)
     
     # Rolling statistics with shorter windows
@@ -202,35 +202,36 @@ def prepare_features(data, lags=15):  # Reduced lags to prevent overfitting
     df['daily_return'] = df['Close'].pct_change()
     df['return_volatility'] = df['daily_return'].rolling(window=10).std()
     
-    # Key technical indicators only (most important ones)
-    # RSI
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    
-    # MACD
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    
-    # Bollinger Bands
-    df['BB_middle'] = df['Close'].rolling(window=20).mean()
-    bb_std = df['Close'].rolling(window=20).std()
-    df['BB_upper'] = df['BB_middle'] + (bb_std * 2)
-    df['BB_lower'] = df['BB_middle'] - (bb_std * 2)
-    df['BB_position'] = (df['Close'] - df['BB_lower']) / (df['BB_upper'] - df['BB_lower'])
-    
-    # Volume features
-    df['volume_ratio'] = df['Volume'] / df['Volume'].rolling(window=20).mean()
-    
-    # Trend indicators
-    df['SMA_50'] = df['Close'].rolling(window=50).mean()
-    df['SMA_200'] = df['Close'].rolling(window=200).mean()
-    df['price_vs_sma50'] = (df['Close'] - df['SMA_50']) / df['SMA_50']
-    df['price_vs_sma200'] = (df['Close'] - df['SMA_200']) / df['SMA_200']
+    # Key technical indicators
+    if use_all_indicators:
+        # RSI
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        # MACD
+        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = exp1 - exp2
+        df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        
+        # Bollinger Bands
+        df['BB_middle'] = df['Close'].rolling(window=20).mean()
+        bb_std = df['Close'].rolling(window=20).std()
+        df['BB_upper'] = df['BB_middle'] + (bb_std * 2)
+        df['BB_lower'] = df['BB_middle'] - (bb_std * 2)
+        df['BB_position'] = (df['Close'] - df['BB_lower']) / (df['BB_upper'] - df['BB_lower'])
+        
+        # Volume features
+        df['volume_ratio'] = df['Volume'] / df['Volume'].rolling(window=20).mean()
+        
+        # Trend indicators
+        df['SMA_50'] = df['Close'].rolling(window=50).mean()
+        df['SMA_200'] = df['Close'].rolling(window=200).mean()
+        df['price_vs_sma50'] = (df['Close'] - df['SMA_50']) / df['SMA_50']
+        df['price_vs_sma200'] = (df['Close'] - df['SMA_200']) / df['SMA_200']
     
     # Drop NaN values
     df = df.dropna()
@@ -238,7 +239,7 @@ def prepare_features(data, lags=15):  # Reduced lags to prevent overfitting
     return df
 
 # Time series cross-validation
-def time_series_cv_score(model, X, y, n_splits=5):
+def time_series_cv_score(model_params, X, y, n_splits=5):
     """Calculate cross-validation scores with time series split"""
     tscv = TimeSeriesSplit(n_splits=n_splits)
     cv_scores = []
@@ -248,7 +249,7 @@ def time_series_cv_score(model, X, y, n_splits=5):
         y_train, y_val = y[train_idx], y[val_idx]
         
         # Train model
-        model_clone = xgb.XGBRegressor(
+        model = xgb.XGBRegressor(
             n_estimators=100,
             learning_rate=0.05,
             max_depth=4,
@@ -259,10 +260,10 @@ def time_series_cv_score(model, X, y, n_splits=5):
             reg_lambda=reg_lambda,
             random_state=42
         )
-        model_clone.fit(X_train, y_train, verbose=False)
+        model.fit(X_train, y_train, verbose=False)
         
         # Predict and score
-        y_pred = model_clone.predict(X_val)
+        y_pred = model.predict(X_val)
         score = r2_score(y_val, y_pred)
         cv_scores.append(score)
     
@@ -309,14 +310,14 @@ def predict_future(model, last_data, feature_cols, days_ahead, scaler, model_unc
         next_pred = model.predict(features_scaled)[0]
         predictions.append(next_pred)
         
-        # Add prediction uncertainty
+        # Add prediction uncertainty (grows with prediction horizon)
         uncertainties.append(model_uncertainty * (1 + i / days_ahead))
         
         # Create new row with updated features
         new_row = current_data.iloc[-1:].copy()
         new_row['Close'] = next_pred
         
-        # Update lag features (simplified to prevent error accumulation)
+        # Update lag features
         for lag in range(1, 16):
             if f'lag_{lag}' in new_row.columns:
                 if lag == 1:
@@ -337,17 +338,14 @@ def predict_future(model, last_data, feature_cols, days_ahead, scaler, model_unc
             new_row['daily_return'] = (next_pred - prev_close) / prev_close
             new_row['return_volatility'] = current_data['daily_return'].tail(10).std() if len(current_data) >= 10 else 0.02
         
-        # Update RSI (simplified)
+        # Update technical indicators (simplified for predictions)
         if 'RSI' in new_row.columns:
-            # Simple RSI approximation
             new_row['RSI'] = 50  # Neutral RSI for predictions
         
-        # Update MACD
         if 'MACD' in new_row.columns:
             new_row['MACD'] = 0
             new_row['MACD_signal'] = 0
         
-        # Update Bollinger Bands
         if 'BB_middle' in new_row.columns:
             recent_closes = current_data['Close'].tail(20)
             new_row['BB_middle'] = recent_closes.mean()
@@ -356,11 +354,9 @@ def predict_future(model, last_data, feature_cols, days_ahead, scaler, model_unc
             new_row['BB_lower'] = new_row['BB_middle'] - (bb_std * 2)
             new_row['BB_position'] = 0.5
         
-        # Update volume
         if 'volume_ratio' in new_row.columns:
             new_row['volume_ratio'] = 1.0
         
-        # Update trend indicators
         if 'price_vs_sma50' in new_row.columns:
             new_row['price_vs_sma50'] = 0
         if 'price_vs_sma200' in new_row.columns:
@@ -471,15 +467,20 @@ if df is not None and not df.empty:
     if train_model:
         with st.spinner("Training XGBoost model with cross-validation... This may take a few moments..."):
             try:
-                # Prepare data
+                # Prepare data with selected feature set
                 df_features = prepare_features(df, use_all_indicators=use_advanced_features)
                 
                 if len(df_features) < 100:
-                    st.warning("Limited historical data available. Predictions may be less reliable.")
-                    st.info(f"Using {len(df_features)} data points for training.")
+                    st.warning(f"Limited historical data available ({len(df_features)} data points). Predictions may be less reliable.")
+                    st.info("Consider selecting an earlier start date for more training data.")
                 
                 # Define feature columns (exclude target and original columns)
-                exclude_cols = ['Close', 'Open', 'High', 'Low', 'Volume', 'SMA_50', 'SMA_200']
+                exclude_cols = ['Close', 'Open', 'High', 'Low', 'Volume']
+                if not use_advanced_features:
+                    exclude_cols.extend(['SMA_50', 'SMA_200', 'RSI', 'MACD', 'MACD_signal', 
+                                        'BB_middle', 'BB_upper', 'BB_lower', 'BB_position', 
+                                        'volume_ratio', 'price_vs_sma50', 'price_vs_sma200'])
+                
                 feature_cols = [col for col in df_features.columns if col not in exclude_cols]
                 
                 # Split data using time series split (chronological order)
@@ -499,7 +500,7 @@ if df is not None and not df.empty:
                 y_test = test_data['Close'].values
                 
                 # Scale features
-                scaler = RobustScaler()  # More robust to outliers
+                scaler = RobustScaler()
                 X_train_scaled = scaler.fit_transform(X_train)
                 X_val_scaled = scaler.transform(X_val)
                 X_test_scaled = scaler.transform(X_test)
@@ -742,35 +743,6 @@ if df is not None and not df.empty:
                             <p>Expected on: {min_date}</p>
                         </div>
                         """, unsafe_allow_html=True)
-                    
-                    # Additional metrics for longer horizons
-                    if trading_days > 60:
-                        st.markdown("### 📊 Key Milestones")
-                        milestone_col1, milestone_col2 = st.columns(2)
-                        
-                        with milestone_col1:
-                            quarter_days = min(63, len(future_df))
-                            quarter_price = future_df['Predicted Price'].iloc[quarter_days-1] if quarter_days > 0 else final_price
-                            quarter_return = ((quarter_price - current_price) / current_price) * 100
-                            st.markdown(f"""
-                            <div class="prediction-card">
-                                <h4>3-Month Outlook</h4>
-                                <p>Target: <b>${quarter_price:.2f}</b></p>
-                                <p>Expected Return: <b style="color: {'green' if quarter_return > 0 else 'red'}">{quarter_return:+.1f}%</b></p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        with milestone_col2:
-                            half_year_days = min(126, len(future_df))
-                            half_year_price = future_df['Predicted Price'].iloc[half_year_days-1] if half_year_days > 0 else final_price
-                            half_year_return = ((half_year_price - current_price) / current_price) * 100
-                            st.markdown(f"""
-                            <div class="prediction-card">
-                                <h4>6-Month Outlook</h4>
-                                <p>Target: <b>${half_year_price:.2f}</b></p>
-                                <p>Expected Return: <b style="color: {'green' if half_year_return > 0 else 'red'}">{half_year_return:+.1f}%</b></p>
-                            </div>
-                            """, unsafe_allow_html=True)
                     
                     # Download predictions
                     csv_pred = future_df.to_csv(index=False)
