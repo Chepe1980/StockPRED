@@ -4,5 +4,4 @@ numpy
 plotly
 scikit-learn
 yfinance
-tensorflow
 xgboost
