@@ -1,11 +1,8 @@
 streamlit
-matplotlib
 pandas
 numpy
-seaborn
-yfinance
 plotly
+scikit-learn
+yfinance
 tensorflow
 xgboost
-scikit-learn
-
