@@ -5,6 +5,7 @@ numpy
 seaborn
 yfinance
 plotly
+tensorflow
 xgboost
 scikit-learn
 
