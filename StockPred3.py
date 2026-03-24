@@ -110,7 +110,7 @@ st.sidebar.markdown("### Time Frame Analysis")
 end_date = datetime.now()
 start_date = st.sidebar.date_input(
     "Start Date",
-    value=pd.to_datetime('2015-01-01'),  # More historical data for LSTM
+    value=pd.to_datetime('2015-01-01'),
     max_value=end_date
 )
 
@@ -264,7 +264,7 @@ def build_lstm_model(seq_length, n_features, lstm_units=100, dropout_rate=0.2, n
     return model
 
 # Train LSTM model
-def train_lstm_model(X_train, y_train, X_val, y_val, epochs=100, batch_size=32):
+def train_lstm_model(X_train, y_train, X_val, y_val, epochs=100, batch_size=32, lstm_units=100, dropout_rate=0.2, num_layers=2):
     """Train LSTM model with early stopping"""
     model = build_lstm_model(X_train.shape[1], X_train.shape[2], 
                              lstm_units, dropout_rate, num_layers)
@@ -293,7 +293,7 @@ def train_lstm_model(X_train, y_train, X_val, y_val, epochs=100, batch_size=32):
         batch_size=batch_size,
         callbacks=[early_stopping, reduce_lr],
         verbose=0,
-        shuffle=False  # Important for time series
+        shuffle=False
     )
     
     return model, history
@@ -412,7 +412,7 @@ if df is not None and not df.empty and TENSORFLOW_AVAILABLE:
                 scaled_data = scaler.fit_transform(data)
                 
                 # Create sequences
-                seq_length = 60  # Look back 60 days
+                seq_length = 60
                 X, y = create_sequences(scaled_data, seq_length)
                 
                 # Split data chronologically
@@ -427,7 +427,7 @@ if df is not None and not df.empty and TENSORFLOW_AVAILABLE:
                 y_test = y[train_size+val_size:]
                 
                 # Train LSTM model
-                model, history = train_lstm_model(X_train, y_train, X_val, y_val, epochs, batch_size)
+                model, history = train_lstm_model(X_train, y_train, X_val, y_val, epochs, batch_size, lstm_units, dropout_rate, num_layers)
                 
                 # Make predictions on test set
                 y_pred_scaled = model.predict(X_test, verbose=0)
@@ -469,19 +469,19 @@ if df is not None and not df.empty and TENSORFLOW_AVAILABLE:
                     <h4>Model Accuracy Assessment</h4>
                     <p><b>R² Score:</b> {r2:.4f}</p>
                     <p>{r2_message}</p>
-                    <p style="font-size: 12px; margin-top: 10px;">💡 R² > 0.85 indicates excellent predictive accuracy. LSTM models typically achieve higher R² than traditional ML models for time series.</p>
+                    <p style="font-size: 12px; margin-top: 10px;">💡 R² > 0.85 indicates excellent predictive accuracy.</p>
                 </div>
                 """, unsafe_allow_html=True)
                 
                 met_col1, met_col2, met_col3, met_col4 = st.columns(4)
                 with met_col1:
-                    st.metric("RMSE", f"${rmse:.2f}", help="Root Mean Square Error")
+                    st.metric("RMSE", f"${rmse:.2f}")
                 with met_col2:
-                    st.metric("MAE", f"${mae:.2f}", help="Mean Absolute Error")
+                    st.metric("MAE", f"${mae:.2f}")
                 with met_col3:
-                    st.metric("R² Score", f"{r2:.4f}", help="Coefficient of Determination")
+                    st.metric("R² Score", f"{r2:.4f}")
                 with met_col4:
-                    st.metric("MAPE", f"{mape:.2f}%", help="Mean Absolute Percentage Error")
+                    st.metric("MAPE", f"{mape:.2f}%")
                 
                 # Plot actual vs predicted
                 test_dates = df_features.index[seq_length + train_size + val_size:]
@@ -500,7 +500,12 @@ if df is not None and not df.empty and TENSORFLOW_AVAILABLE:
                 
                 if show_model_details:
                     st.markdown("### 🏗️ Model Architecture")
-                    st.text(model.summary())
+                    # Get model summary as string
+                    from io import StringIO
+                    stream = StringIO()
+                    model.summary(print_fn=lambda x: stream.write(x + '\n'))
+                    model_summary = stream.getvalue()
+                    st.text(model_summary)
                 
                 # Generate future predictions
                 st.subheader(f"🔮 {horizon_text} Price Prediction")
@@ -623,7 +628,7 @@ if df is not None and not df.empty and TENSORFLOW_AVAILABLE:
     - **Multi-feature Learning:** Automatically learns relationships between technical indicators
     
     **Model Features:**
-    - Bidirectional LSTM architecture for better pattern recognition
+    - LSTM architecture for better pattern recognition
     - Dropout layers to prevent overfitting
     - Early stopping to optimize training
     - Learning rate reduction for better convergence
