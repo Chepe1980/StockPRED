@@ -7,7 +7,7 @@ from plotly.subplots import make_subplots
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.preprocessing import RobustScaler
 import yfinance as yf
 from datetime import datetime, timedelta
 import warnings
@@ -269,13 +269,13 @@ def time_series_cv_score(X, y, n_splits=5):
     
     return np.mean(cv_scores), np.std(cv_scores)
 
-# Train XGBoost model with regularization
+# Train XGBoost model with regularization (simplified - no early stopping)
 def train_xgboost_model(X_train, y_train, X_val, y_val):
-    """Train model with early stopping to prevent overfitting"""
+    """Train model with regularization - simplified version without early stopping"""
     # Create model
     model = xgb.XGBRegressor(
-        n_estimators=500,
-        learning_rate=0.03,
+        n_estimators=200,  # Fixed number of trees
+        learning_rate=0.05,
         max_depth=4,
         min_child_weight=5,
         subsample=0.7,
@@ -286,24 +286,8 @@ def train_xgboost_model(X_train, y_train, X_val, y_val):
         n_jobs=-1
     )
     
-    # Train with early stopping - using the correct parameter name
-    try:
-        # Try with eval_metric (newer versions)
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            eval_metric='rmse',
-            early_stopping_rounds=20,
-            verbose=False
-        )
-    except TypeError:
-        # Fallback for older versions without eval_metric
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            early_stopping_rounds=20,
-            verbose=False
-        )
+    # Simple fit without eval_set to avoid compatibility issues
+    model.fit(X_train, y_train, verbose=False)
     
     return model
 
@@ -467,7 +451,7 @@ if df is not None and not df.empty:
     
     # Model Training Section
     st.header("🤖 AI Price Prediction Model")
-    st.markdown(f"Train XGBoost model with cross-validation to predict stock prices for the next **{horizon_text}**")
+    st.markdown(f"Train XGBoost model to predict stock prices for the next **{horizon_text}**")
     
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -476,7 +460,7 @@ if df is not None and not df.empty:
         use_advanced_features = st.checkbox("Use Advanced Technical Indicators", value=True)
     
     if train_model:
-        with st.spinner("Training XGBoost model with cross-validation... This may take a few moments..."):
+        with st.spinner("Training XGBoost model... This may take a few moments..."):
             try:
                 # Prepare data with selected feature set
                 df_features = prepare_features(df, use_all_indicators=use_advanced_features)
@@ -520,7 +504,7 @@ if df is not None and not df.empty:
                 X_val_scaled = scaler.transform(X_val)
                 X_test_scaled = scaler.transform(X_test)
                 
-                # Train model with regularization
+                # Train model
                 model = train_xgboost_model(X_train_scaled, y_train, X_val_scaled, y_val)
                 
                 # Evaluate on test set
@@ -788,15 +772,14 @@ if df is not None and not df.empty:
     **Disclaimer:** This app uses machine learning for educational purposes only. 
     Stock market predictions are inherently uncertain. Always do your own research before making investment decisions.
     
-    **Model Improvements:**
-    - **Time Series Cross-Validation:** Prevents look-ahead bias and provides more realistic performance estimates
-    - **Regularization:** L1 and L2 regularization to reduce overfitting
-    - **Early Stopping:** Stops training when validation performance stops improving
+    **Model Features:**
+    - **XGBoost with Regularization:** L1 and L2 regularization to reduce overfitting
+    - **Time Series Cross-Validation:** Prevents look-ahead bias
     - **Robust Scaling:** Handles outliers better than standard scaling
-    - **Uncertainty Estimation:** Provides confidence intervals based on historical prediction errors
-    - **Reduced Feature Set:** Focuses on most predictive indicators to prevent overfitting
+    - **Uncertainty Estimation:** Provides confidence intervals based on historical errors
+    - **Adjustable Prediction Horizon:** Predict from 1 week to 2 years ahead
     
-    **Interpretation:** R² scores above 0.7 indicate good predictive capability. Lower scores suggest the stock is highly volatile or unpredictable with historical patterns.
+    **Interpretation:** R² scores above 0.7 indicate good predictive capability. Lower scores suggest the stock is highly volatile or unpredictable.
     """)
     
 else:
